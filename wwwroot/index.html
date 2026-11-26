@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Task Manager</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, sans-serif; color: #242424; background: #f5f6f7; }
+    body { max-width: 860px; margin: 40px auto; padding: 0 18px; }
+    h1 { margin-bottom: 6px; font-size: 28px; }
+    .muted { color: #666; }
+    section, .task { background: white; border: 1px solid #ddd; border-radius: 6px; padding: 16px; margin: 14px 0; }
+    input, textarea, select, button { box-sizing: border-box; font: inherit; padding: 9px; }
+    input, textarea, select { border: 1px solid #bbb; border-radius: 4px; width: 100%; margin: 5px 0 10px; }
+    textarea { min-height: 75px; resize: vertical; }
+    button { border: 0; border-radius: 4px; background: #315d8a; color: white; cursor: pointer; margin-right: 6px; }
+    button.secondary { background: #666; }
+    button.danger { background: #a33; }
+    .row { display: flex; gap: 10px; align-items: center; }
+    .row > * { flex: 1; }
+    .task h3 { margin: 0 0 8px; }
+    .task p { white-space: pre-wrap; }
+    #message { min-height: 1.4em; color: #a33; }
+    [hidden] { display: none !important; }
+    @media (max-width: 560px) { .row { display: block; } }
+  </style>
+</head>
+<body>
+  <h1>Task Manager</h1>
+  <p class="muted">A simple place to keep track of work.</p>
+  <p id="message" role="status"></p>
+
+  <section id="auth">
+    <h2 id="auth-title">Sign in</h2>
+    <form id="auth-form">
+      <label>Email <input id="email" type="email" required maxlength="254"></label>
+      <label>Password <input id="password" type="password" required minlength="8" maxlength="100"></label>
+      <button id="auth-submit">Sign in</button>
+      <button type="button" class="secondary" id="toggle-auth">Create account</button>
+    </form>
+  </section>
+
+  <main id="tasks-view" hidden>
+    <section>
+      <div class="row">
+        <h2>Tasks</h2>
+        <button id="sign-out" class="secondary">Sign out</button>
+      </div>
+      <input id="search" type="search" placeholder="Search title or description">
+      <div id="task-list"></div>
+      <div class="row">
+        <button id="previous" class="secondary">Previous</button>
+        <span id="page-label" class="muted"></span>
+        <button id="next" class="secondary">Next</button>
+      </div>
+    </section>
+    <section>
+      <h2 id="form-title">Add a task</h2>
+      <form id="task-form">
+        <input id="task-id" type="hidden">
+        <label>Title <input id="task-title" required maxlength="120"></label>
+        <label>Description <textarea id="task-description" required maxlength="2000"></textarea></label>
+        <label>Status
+          <select id="task-status" required>
+            <option value="Todo">To do</option>
+            <option value="InProgress">In progress</option>
+            <option value="Done">Done</option>
+          </select>
+        </label>
+        <button id="save-task">Add task</button>
+        <button type="button" class="secondary" id="cancel-edit" hidden>Cancel</button>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      accessToken: sessionStorage.getItem("accessToken"),
+      refreshToken: sessionStorage.getItem("refreshToken"),
+      role: sessionStorage.getItem("role"),
+      registering: false,
+      page: 1,
+      pageSize: 10,
+      totalPages: 0
+    };
+    const message = document.querySelector("#message");
+
+    function showMessage(text) {
+      message.textContent = text;
+    }
+
+    function showApp() {
+      document.querySelector("#auth").hidden = Boolean(state.accessToken);
+      document.querySelector("#tasks-view").hidden = !state.accessToken;
+      if (state.accessToken) loadTasks();
+    }
+
+    async function request(url, options = {}, retry = true) {
+      const headers = { "Content-Type": "application/json", ...options.headers };
+      if (state.accessToken) headers.Authorization = `Bearer ${state.accessToken}`;
+      let response = await fetch(url, { ...options, headers });
+
+      if (response.status === 401 && retry && state.refreshToken && !url.endsWith("/refresh")) {
+        const refreshed = await fetch("/api/auth/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refreshToken: state.refreshToken })
+        });
+        if (refreshed.ok) {
+          saveSession(await refreshed.json());
+          headers.Authorization = `Bearer ${state.accessToken}`;
+          response = await fetch(url, { ...options, headers });
+        } else {
+          signOut();
+        }
+      }
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.message || body.title || `Request failed (${response.status})`);
+      }
+      return response.status === 204 ? null : response.json();
+    }
+
+    function saveSession(data) {
+      state.accessToken = data.accessToken;
+      state.refreshToken = data.refreshToken;
+      state.role = data.user.role;
+      sessionStorage.setItem("accessToken", state.accessToken);
+      sessionStorage.setItem("refreshToken", state.refreshToken);
+      sessionStorage.setItem("role", state.role);
+    }
+
+    function signOut() {
+      state.accessToken = state.refreshToken = state.role = null;
+      sessionStorage.clear();
+      showApp();
+      showMessage("Signed out.");
+    }
+
+    document.querySelector("#auth-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      try {
+        const endpoint = state.registering ? "register" : "login";
+        const data = await request(`/api/auth/${endpoint}`, {
+          method: "POST",
+          body: JSON.stringify({
+            email: document.querySelector("#email").value,
+            password: document.querySelector("#password").value
+          })
+        }, false);
+        saveSession(data);
+        showMessage("");
+        showApp();
+      } catch (error) {
+        showMessage(error.message);
+      }
+    });
+
+    document.querySelector("#toggle-auth").addEventListener("click", () => {
+      state.registering = !state.registering;
+      document.querySelector("#auth-title").textContent = state.registering ? "Create account" : "Sign in";
+      document.querySelector("#auth-submit").textContent = state.registering ? "Register" : "Sign in";
+      document.querySelector("#toggle-auth").textContent = state.registering ? "Back to sign in" : "Create account";
+    });
+
+    async function loadTasks() {
+      const search = encodeURIComponent(document.querySelector("#search").value);
+      try {
+        const result = await request(`/api/tasks?page=${state.page}&pageSize=${state.pageSize}&search=${search}`);
+        state.totalPages = result.totalPages;
+        document.querySelector("#page-label").textContent =
+          `Page ${result.page} of ${Math.max(result.totalPages, 1)} (${result.totalItems} tasks)`;
+        document.querySelector("#previous").disabled = state.page <= 1;
+        document.querySelector("#next").disabled = state.page >= state.totalPages;
+        const list = document.querySelector("#task-list");
+        list.replaceChildren();
+        if (!result.items.length) {
+          list.textContent = "No tasks found.";
+          return;
+        }
+        for (const task of result.items) {
+          const card = document.createElement("article");
+          card.className = "task";
+          const title = document.createElement("h3");
+          title.textContent = task.title;
+          const description = document.createElement("p");
+          description.textContent = task.description;
+          const status = document.createElement("span");
+          status.className = "muted";
+          status.textContent = `Status: ${task.status}`;
+          const edit = document.createElement("button");
+          edit.className = "secondary";
+          edit.textContent = "Edit";
+          edit.addEventListener("click", () => startEdit(task));
+          card.append(title, description, status, document.createElement("br"), edit);
+          if (state.role === "Admin") {
+            const remove = document.createElement("button");
+            remove.className = "danger";
+            remove.textContent = "Delete";
+            remove.addEventListener("click", () => deleteTask(task.id));
+            card.append(remove);
+          }
+          list.append(card);
+        }
+      } catch (error) {
+        showMessage(error.message);
+      }
+    }
+
+    function startEdit(task) {
+      document.querySelector("#task-id").value = task.id;
+      document.querySelector("#task-title").value = task.title;
+      document.querySelector("#task-description").value = task.description;
+      document.querySelector("#task-status").value = task.status;
+      document.querySelector("#form-title").textContent = "Update task";
+      document.querySelector("#save-task").textContent = "Save changes";
+      document.querySelector("#cancel-edit").hidden = false;
+      window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+    }
+
+    function resetForm() {
+      document.querySelector("#task-form").reset();
+      document.querySelector("#task-id").value = "";
+      document.querySelector("#form-title").textContent = "Add a task";
+      document.querySelector("#save-task").textContent = "Add task";
+      document.querySelector("#cancel-edit").hidden = true;
+    }
+
+    document.querySelector("#task-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      const id = document.querySelector("#task-id").value;
+      const body = {
+        title: document.querySelector("#task-title").value,
+        description: document.querySelector("#task-description").value,
+        status: document.querySelector("#task-status").value
+      };
+      try {
+        await request(id ? `/api/tasks/${id}` : "/api/tasks", {
+          method: id ? "PUT" : "POST",
+          body: JSON.stringify(body)
+        });
+        resetForm();
+        showMessage("Task saved.");
+        loadTasks();
+      } catch (error) {
+        showMessage(error.message);
+      }
+    });
+
+    async function deleteTask(id) {
+      if (!confirm("Delete this task?")) return;
+      try {
+        await request(`/api/tasks/${id}`, { method: "DELETE" });
+        showMessage("Task deleted.");
+        loadTasks();
+      } catch (error) {
+        showMessage(error.message);
+      }
+    }
+
+    document.querySelector("#cancel-edit").addEventListener("click", resetForm);
+    document.querySelector("#sign-out").addEventListener("click", signOut);
+    document.querySelector("#search").addEventListener("input", () => {
+      state.page = 1;
+      loadTasks();
+    });
+    document.querySelector("#previous").addEventListener("click", () => {
+      state.page--;
+      loadTasks();
+    });
+    document.querySelector("#next").addEventListener("click", () => {
+      state.page++;
+      loadTasks();
+    });
+
+    showApp();
+  </script>
+</body>
+</html>
